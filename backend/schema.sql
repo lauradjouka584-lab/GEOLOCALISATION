@@ -24,6 +24,8 @@ CREATE TABLE IF NOT EXISTS positions (
     accuracy     REAL    CHECK (accuracy >= 0),
     speed        REAL    CHECK (speed    >= 0),
     altitude     REAL,
+    -- Cap en degrés, de 0 à 360 : affiché dans l'écran Détail
+    heading      REAL    CHECK (heading >= 0 AND heading <= 360),
     recorded_at  TEXT    NOT NULL,
     created_at   TEXT    NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
