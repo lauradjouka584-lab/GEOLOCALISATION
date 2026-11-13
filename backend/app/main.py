@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.database import init_db
-from app.routes import auth
+from app.routes import auth, positions
 
 
 @asynccontextmanager
@@ -17,6 +17,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="GeoTrack API", lifespan=lifespan)
 # Branche les routes d'authentification sur le serveur
 app.include_router(auth.router)
+app.include_router(positions.router)
 
 
 # Route de test : prouve que le serveur fonctionne
