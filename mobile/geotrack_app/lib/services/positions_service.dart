@@ -34,22 +34,43 @@ class PositionsService {
   }
 
   // Valeur optionnelle : renvoie null si le GPS ne la donne pas
-  // (NaN, negative ou trop grande). Le serveur accepte null.
   static double? _opt(double v, {double min = 0, double max = 1e9}) {
     if (v.isNaN || v < min || v > max) return null;
     return v;
   }
 
-  // Envoie une position a POST /positions
-  static Future<void> send(Position p) async {
-    // 1. On relit le jeton de connexion
+  // Relit le jeton de connexion (ou arrete si absent)
+  static Future<String> _token() async {
     final prefs = await SharedPreferences.getInstance();
     final token = prefs.getString('access_token');
     if (token == null) {
       throw SendException('Session expirée. Reconnectez-vous.');
     }
+    return token;
+  }
 
-    // On prepare le corps JSON
+  // Transforme une erreur reseau en message simple
+  static SendException _fail(DioException e) {
+    final code = e.response?.statusCode;
+    if (code == null) {
+      return SendException('Impossible de joindre le serveur.');
+    }
+    if (code == 401) {
+      return SendException('Session expirée. Reconnectez-vous.');
+    }
+    if (code == 404) {
+      return SendException('Relevé introuvable.');
+    }
+    if (code == 422) {
+      return SendException('Données invalides.');
+    }
+    return SendException('Erreur serveur ($code).');
+  }
+
+  // Envoie une position a POST /positions
+  static Future<void> send(Position p) async {
+    final token = await _token();
+
     final body = {
       'client_uuid': _uuid(),
       'latitude': p.latitude,
@@ -61,7 +82,6 @@ class PositionsService {
       'recorded_at': p.timestamp.toUtc().toIso8601String(),
     };
 
-    //  On envoie avec l'en-tete Authorization: Bearer <jeton>
     try {
       await _dio.post(
         '/positions',
@@ -69,18 +89,40 @@ class PositionsService {
         options: Options(headers: {'Authorization': 'Bearer $token'}),
       );
     } on DioException catch (e) {
-      // 4. On traduit les erreurs en messages simples
-      final code = e.response?.statusCode;
-      if (code == null) {
-        throw SendException('Impossible de joindre le serveur.');
-      }
-      if (code == 401) {
-        throw SendException('Session expirée. Reconnectez-vous.');
-      }
-      if (code == 422) {
-        throw SendException('Position refusée : données invalides.');
-      }
-      throw SendException('Erreur serveur ($code).');
+      throw _fail(e);
+    }
+  }
+
+  // Lit mes positions avec GET /positions (les plus recentes d'abord)
+  static Future<List<Map<String, dynamic>>> list({int limit = 1000}) async {
+    final token = await _token();
+    try {
+      final res = await _dio.get(
+        '/positions',
+        queryParameters: {'limit': limit},
+        options: Options(headers: {'Authorization': 'Bearer $token'}),
+      );
+      final data = res.data;
+      // Accepte une liste directe ou un objet qui contient la liste
+      final List raw = data is List
+          ? data
+          : (data is Map ? (data['items'] ?? data['positions'] ?? []) : []);
+      return raw.map((e) => Map<String, dynamic>.from(e as Map)).toList();
+    } on DioException catch (e) {
+      throw _fail(e);
+    }
+  }
+
+  // Supprime une position avec DELETE /positions/{id}
+  static Future<void> delete(int id) async {
+    final token = await _token();
+    try {
+      await _dio.delete(
+        '/positions/$id',
+        options: Options(headers: {'Authorization': 'Bearer $token'}),
+      );
+    } on DioException catch (e) {
+      throw _fail(e);
     }
   }
 }

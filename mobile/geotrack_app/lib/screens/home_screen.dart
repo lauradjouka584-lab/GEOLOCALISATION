@@ -1,32 +1,32 @@
-// Cadre de l'application : les 4 onglets et la barre de navigation du bas
 import 'package:flutter/material.dart';
-
+import 'package:shared_preferences/shared_preferences.dart';
 import '../core/app_colors.dart';
 import '../core/app_header.dart';
-import '../services/token_storage.dart';
+import 'history_screen.dart';
 import 'login_screen.dart';
 import 'map_screen.dart';
 
+// Coque de l'application : 4 onglets en bas
 class HomeScreen extends StatefulWidget {
+  final String email;
   const HomeScreen({super.key, required this.email});
-
-  final String email;   // l'email de l'utilisateur connecté
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  int _index = 0;   // l'onglet affiché : 0 = Carte, 1 = Trajet, 2 = Historique, 3 = Paramètres
+  int _index = 0; // onglet affiche
+  int _historyToken = 0; // change a chaque ouverture de l'historique
 
-  // Déconnexion : on efface le jeton et on revient à la connexion
+  // Deconnexion : on efface le jeton puis retour a la connexion
   Future<void> _logout() async {
-    await TokenStorage.clear();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('access_token');
     if (!mounted) return;
-    Navigator.pushAndRemoveUntil(
-      context,
-      MaterialPageRoute(builder: (context) => const LoginScreen()),
-      (route) => false,   // efface toutes les pages précédentes
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => const LoginScreen()),
+      (route) => false,
     );
   }
 
@@ -34,62 +34,51 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: AppColors.background,
-      // IndexedStack garde tous les onglets en vie : la carte ne se recharge pas quand on change d'onglet
+      // IndexedStack garde chaque onglet en vie (la carte ne se recharge pas)
       body: IndexedStack(
         index: _index,
         children: [
           const MapScreen(),
           const _ComingSoon(title: 'Trajet'),
-          const _ComingSoon(title: 'Historique'),
+          HistoryScreen(refreshToken: _historyToken),
           _SettingsPlaceholder(email: widget.email, onLogout: _logout),
         ],
       ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _index,
-        onDestinationSelected: (i) => setState(() => _index = i),
         backgroundColor: Colors.white,
-        indicatorColor: AppColors.tabBackground,
+        indicatorColor: const Color(0xFFDBE1FF),
+        onDestinationSelected: (i) => setState(() {
+          _index = i;
+          if (i == 2) _historyToken++; // recharge l'historique
+        }),
         destinations: const [
-          NavigationDestination(
-            icon: Icon(Icons.explore_outlined),
-            selectedIcon: Icon(Icons.explore, color: AppColors.primary),
-            label: 'Carte',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.route_outlined),
-            selectedIcon: Icon(Icons.route, color: AppColors.primary),
-            label: 'Trajet',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.history),
-            selectedIcon: Icon(Icons.history, color: AppColors.primary),
-            label: 'Historique',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.settings_outlined),
-            selectedIcon: Icon(Icons.settings, color: AppColors.primary),
-            label: 'Paramètres',
-          ),
+          NavigationDestination(icon: Icon(Icons.map_outlined), selectedIcon: Icon(Icons.map), label: 'Carte'),
+          NavigationDestination(icon: Icon(Icons.route_outlined), selectedIcon: Icon(Icons.route), label: 'Trajet'),
+          NavigationDestination(icon: Icon(Icons.history), selectedIcon: Icon(Icons.history), label: 'Historique'),
+          NavigationDestination(icon: Icon(Icons.settings_outlined), selectedIcon: Icon(Icons.settings), label: 'Paramètres'),
         ],
       ),
     );
   }
 }
 
-// Page provisoire (Trajet, Historique) : sera remplacée aux jours suivants
+// Page temporaire pour les ecrans pas encore faits
 class _ComingSoon extends StatelessWidget {
-  const _ComingSoon({required this.title});
-
   final String title;
+  const _ComingSoon({required this.title});
 
   @override
   Widget build(BuildContext context) {
     return Column(
       children: [
         AppHeader(subtitle: title),
-        const Expanded(
+        Expanded(
           child: Center(
-            child: Text('Bientôt disponible', style: TextStyle(color: AppColors.textSecondary)),
+            child: Text(
+              '$title : bientôt disponible',
+              style: const TextStyle(color: AppColors.textSecondary),
+            ),
           ),
         ),
       ],
@@ -97,36 +86,57 @@ class _ComingSoon extends StatelessWidget {
   }
 }
 
-// Paramètres provisoires : l'email et le bouton de déconnexion
+// Parametres provisoires : email + deconnexion
 class _SettingsPlaceholder extends StatelessWidget {
-  const _SettingsPlaceholder({required this.email, required this.onLogout});
-
   final String email;
   final VoidCallback onLogout;
+  const _SettingsPlaceholder({required this.email, required this.onLogout});
 
   @override
   Widget build(BuildContext context) {
     return Column(
       children: [
         const AppHeader(subtitle: 'Paramètres'),
-        Padding(
-          padding: const EdgeInsets.all(20),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Text(email, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-              const SizedBox(height: 20),
-              FilledButton.icon(
-                onPressed: onLogout,
-                icon: const Icon(Icons.logout),
-                label: const Text('Se déconnecter'),
-                style: FilledButton.styleFrom(
-                  backgroundColor: const Color(0xFFFFDAD6),   // rouge clair, comme ta maquette
-                  foregroundColor: AppColors.error,
-                  minimumSize: const Size.fromHeight(48),
+        Expanded(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: const Color(0xFFE2E8F0)),
+                  ),
+                  child: Text(
+                    'Connecté : $email',
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w600,
+                      color: AppColors.text,
+                    ),
+                  ),
                 ),
-              ),
-            ],
+                const Spacer(),
+                SizedBox(
+                  width: double.infinity,
+                  height: 52,
+                  child: ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppColors.primary,
+                      foregroundColor: Colors.white,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    onPressed: onLogout,
+                    child: const Text('Se déconnecter'),
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ],
