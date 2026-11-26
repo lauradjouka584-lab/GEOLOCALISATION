@@ -1,8 +1,10 @@
+import 'dart:async';
 import 'dart:math';
 import 'package:dio/dio.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../core/config.dart';
+import 'offline_queue.dart';
 
 // Erreur avec un message deja pret a afficher a l'utilisateur
 class SendException implements Exception {
@@ -13,17 +15,24 @@ class SendException implements Exception {
   String toString() => message;
 }
 
+// Cas particulier : pas de reseau, la position est gardee en attente
+class QueuedException extends SendException {
+  QueuedException() : super('Hors ligne : position mise en attente.');
+}
+
 class PositionsService {
   // Client HTTP (dio) : adresse de base + delai maximum d'attente
   static final Dio _dio = Dio(BaseOptions(
     baseUrl: AppConfig.apiBaseUrl,
     connectTimeout: const Duration(seconds: 10),
-    receiveTimeout: const Duration(seconds: 10),
+    receiveTimeout: const Duration(seconds: 20),
   ));
+
+  static bool _flushing = false; // une synchronisation a la fois
 
   // Fabrique un identifiant unique (format UUID v4)
   // Le serveur s'en sert pour ignorer les doublons
-  static String _uuid() {
+  static String newUuid() {
     final r = Random.secure();
     final b = List<int>.generate(16, (_) => r.nextInt(256));
     b[6] = (b[6] & 0x0f) | 0x40; // marque la version 4
@@ -37,6 +46,20 @@ class PositionsService {
   static double? _opt(double v, {double min = 0, double max = 1e9}) {
     if (v.isNaN || v < min || v > max) return null;
     return v;
+  }
+
+  // Transforme une position GPS en JSON pour l'API
+  static Map<String, dynamic> _toJson(Position p, String id) {
+    return {
+      'client_uuid': id,
+      'latitude': p.latitude,
+      'longitude': p.longitude,
+      'accuracy': _opt(p.accuracy),
+      'speed': _opt(p.speed), // en m/s
+      'altitude': p.altitude.isNaN ? null : p.altitude,
+      'heading': _opt(p.heading, max: 360),
+      'recorded_at': p.timestamp.toUtc().toIso8601String(),
+    };
   }
 
   // Relit le jeton de connexion (ou arrete si absent)
@@ -68,20 +91,10 @@ class PositionsService {
   }
 
   // Envoie une position a POST /positions
+  // Si le reseau est coupe : on la garde en attente (QueuedException)
   static Future<void> send(Position p) async {
     final token = await _token();
-
-    final body = {
-      'client_uuid': _uuid(),
-      'latitude': p.latitude,
-      'longitude': p.longitude,
-      'accuracy': _opt(p.accuracy),
-      'speed': _opt(p.speed), // en m/s
-      'altitude': p.altitude.isNaN ? null : p.altitude,
-      'heading': _opt(p.heading, max: 360),
-      'recorded_at': p.timestamp.toUtc().toIso8601String(),
-    };
-
+    final body = _toJson(p, newUuid());
     try {
       await _dio.post(
         '/positions',
@@ -89,8 +102,78 @@ class PositionsService {
         options: Options(headers: {'Authorization': 'Bearer $token'}),
       );
     } on DioException catch (e) {
+      if (e.response == null) {
+        await OfflineQueue.add([body]);
+        throw QueuedException();
+      }
       throw _fail(e);
     }
+    // Le reseau marche : on en profite pour vider la file d'attente
+    if (OfflineQueue.count.value > 0) unawaited(flushQueue());
+  }
+
+  // Envoie plusieurs positions d'un coup : POST /positions/batch
+  // (500 maximum par envoi, donc on coupe en paquets)
+  static Future<void> sendBatch(List<Position> ps, List<String> ids) async {
+    final token = await _token();
+    for (var i = 0; i < ps.length; i += 500) {
+      final end = min(i + 500, ps.length);
+      final body = [
+        for (var j = i; j < end; j++) _toJson(ps[j], ids[j]),
+      ];
+      try {
+        await _dio.post(
+          '/positions/batch',
+          data: body,
+          options: Options(headers: {'Authorization': 'Bearer $token'}),
+        );
+      } on DioException catch (e) {
+        if (e.response == null) {
+          // Reseau coupe : on garde tout ce qui reste en attente
+          await OfflineQueue.add([
+            for (var j = i; j < ps.length; j++) _toJson(ps[j], ids[j]),
+          ]);
+          throw QueuedException();
+        }
+        throw _fail(e);
+      }
+    }
+  }
+
+  // Envoie la file d'attente au serveur. Renvoie le nombre de positions envoyees.
+  static Future<int> flushQueue() async {
+    if (_flushing) return 0;
+    _flushing = true;
+    var synced = 0;
+    try {
+      final token = await _token();
+      while (true) {
+        final items = await OfflineQueue.read();
+        if (items.isEmpty) break;
+        final chunk = items.take(500).toList();
+        try {
+          await _dio.post(
+            '/positions/batch',
+            data: chunk,
+            options: Options(headers: {'Authorization': 'Bearer $token'}),
+          );
+        } on DioException catch (e) {
+          if (e.response?.statusCode == 422) {
+            // Donnees invalides : inutile de reessayer, on les retire
+            await OfflineQueue.removeFirst(chunk.length);
+            continue;
+          }
+          break; // reseau coupe ou session expiree : on reessaiera plus tard
+        }
+        await OfflineQueue.removeFirst(chunk.length);
+        synced += chunk.length;
+      }
+    } on SendException {
+      // pas de jeton : rien a faire
+    } finally {
+      _flushing = false;
+    }
+    return synced;
   }
 
   // Lit mes positions avec GET /positions (les plus recentes d'abord)
@@ -119,6 +202,19 @@ class PositionsService {
     try {
       await _dio.delete(
         '/positions/$id',
+        options: Options(headers: {'Authorization': 'Bearer $token'}),
+      );
+    } on DioException catch (e) {
+      throw _fail(e);
+    }
+  }
+
+  // Supprime TOUTES mes positions avec DELETE /positions
+  static Future<void> deleteAll() async {
+    final token = await _token();
+    try {
+      await _dio.delete(
+        '/positions',
         options: Options(headers: {'Authorization': 'Bearer $token'}),
       );
     } on DioException catch (e) {
